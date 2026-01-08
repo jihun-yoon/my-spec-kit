@@ -5,13 +5,28 @@ set -e
 JSON_MODE=false
 SHORT_NAME=""
 BRANCH_NUMBER=""
+GITBUTLER_MODE=false
+GITBUTLER_MARKED=false
 ARGS=()
+
+# Auto-detect GitButler: if .git/gitbutler/ exists, default to GitButler mode
+# This check happens before flag parsing so flags can override
+if [ -d ".git/gitbutler" ] || [ -d "$(git rev-parse --show-toplevel 2>/dev/null)/.git/gitbutler" ]; then
+    GITBUTLER_MODE=true
+fi
+
 i=1
 while [ $i -le $# ]; do
     arg="${!i}"
     case "$arg" in
-        --json) 
-            JSON_MODE=true 
+        --json)
+            JSON_MODE=true
+            ;;
+        --gitbutler)
+            GITBUTLER_MODE=true
+            ;;
+        --no-gitbutler)
+            GITBUTLER_MODE=false
             ;;
         --short-name)
             if [ $((i + 1)) -gt $# ]; then
@@ -40,11 +55,13 @@ while [ $i -le $# ]; do
             fi
             BRANCH_NUMBER="$next_arg"
             ;;
-        --help|-h) 
-            echo "Usage: $0 [--json] [--short-name <name>] [--number N] <feature_description>"
+        --help|-h)
+            echo "Usage: $0 [--json] [--gitbutler] [--no-gitbutler] [--short-name <name>] [--number N] <feature_description>"
             echo ""
             echo "Options:"
             echo "  --json              Output in JSON format"
+            echo "  --gitbutler         Use GitButler virtual branches (auto-enabled if .git/gitbutler/ exists)"
+            echo "  --no-gitbutler      Use traditional git checkout (opt-out of GitButler)"
             echo "  --short-name <name> Provide a custom short name (2-4 words) for the branch"
             echo "  --number N          Specify branch number manually (overrides auto-detection)"
             echo "  --help, -h          Show this help message"
@@ -52,6 +69,8 @@ while [ $i -le $# ]; do
             echo "Examples:"
             echo "  $0 'Add user authentication system' --short-name 'user-auth'"
             echo "  $0 'Implement OAuth2 integration for API' --number 5"
+            echo "  $0 'Add payment processing' --gitbutler"
+            echo "  $0 'Quick fix' --no-gitbutler"
             exit 0
             ;;
         *) 
@@ -63,7 +82,7 @@ done
 
 FEATURE_DESCRIPTION="${ARGS[*]}"
 if [ -z "$FEATURE_DESCRIPTION" ]; then
-    echo "Usage: $0 [--json] [--short-name <name>] [--number N] <feature_description>" >&2
+    echo "Usage: $0 [--json] [--gitbutler] [--no-gitbutler] [--short-name <name>] [--number N] <feature_description>" >&2
     exit 1
 fi
 
@@ -271,7 +290,23 @@ if [ ${#BRANCH_NAME} -gt $MAX_BRANCH_LENGTH ]; then
     >&2 echo "[specify] Truncated to: $BRANCH_NAME (${#BRANCH_NAME} bytes)"
 fi
 
-if [ "$HAS_GIT" = true ]; then
+# Branch creation: GitButler mode vs traditional git
+if [ "$GITBUTLER_MODE" = true ]; then
+    if command -v but &> /dev/null; then
+        >&2 echo "[specify] GitButler mode: Creating virtual branch '$BRANCH_NAME'"
+        # Create branch (anchors to main/target by default)
+        but branch new "$BRANCH_NAME" 2>/dev/null || true
+        # Mark branch for auto-assign so new spec files go to this branch
+        but mark "$BRANCH_NAME" 2>/dev/null || true
+        GITBUTLER_MARKED=true
+    else
+        >&2 echo "[specify] GitButler mode: 'but' CLI not found"
+        >&2 echo "[specify] → Install: brew install gitbutlerapp/tap/but"
+        >&2 echo "[specify] → Or create virtual branch '$BRANCH_NAME' in GitButler UI"
+        >&2 echo "[specify] → Then drag specs/$BRANCH_NAME/ files to the new virtual branch"
+        GITBUTLER_MARKED=false
+    fi
+elif [ "$HAS_GIT" = true ]; then
     git checkout -b "$BRANCH_NAME"
 else
     >&2 echo "[specify] Warning: Git repository not detected; skipped branch creation for $BRANCH_NAME"
@@ -286,6 +321,14 @@ if [ -f "$TEMPLATE" ]; then cp "$TEMPLATE" "$SPEC_FILE"; else touch "$SPEC_FILE"
 
 # Set the SPECIFY_FEATURE environment variable for the current session
 export SPECIFY_FEATURE="$BRANCH_NAME"
+
+# GitButler mode: branch remains marked so user can continue working on it
+# User can manually unmark with: but mark -d <branch-name>
+if [ "$GITBUTLER_MODE" = true ] && [ "$GITBUTLER_MARKED" = true ]; then
+    >&2 echo "[specify] GitButler: Virtual branch '$BRANCH_NAME' created and marked"
+    >&2 echo "[specify] → Changes will auto-assign to this branch"
+    >&2 echo "[specify] → To unmark: but mark -d $BRANCH_NAME"
+fi
 
 if $JSON_MODE; then
     printf '{"BRANCH_NAME":"%s","SPEC_FILE":"%s","FEATURE_NUM":"%s"}\n' "$BRANCH_NAME" "$SPEC_FILE" "$FEATURE_NUM"

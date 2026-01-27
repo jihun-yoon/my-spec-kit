@@ -16,6 +16,7 @@ This documentation provides a comprehensive analysis of the Spec-Kit repository 
 | [04-context-handling.md](04-context-handling.md) | **KEY**: How context flows and the limitation to fix |
 | [05-input-output-flows.md](05-input-output-flows.md) | Detailed I/O for each command and script |
 | [06-implementation-guide.md](06-implementation-guide.md) | **IMPLEMENTATION**: Code changes needed for reference docs |
+| [07-smart-reference-loading.md](07-smart-reference-loading.md) | **KEY**: Manifest + summary system to avoid context waste |
 
 ---
 
@@ -35,18 +36,27 @@ The system does NOT support:
 3. Scripts return paths but commands don't load reference docs
 
 ### The Solution (Proposed)
-Add a `references/` directory that commands can load for context:
+Add a `references/` directory with a **smart loading system** that avoids context waste:
 
 ```
 specs/###-feature/
-├── references/          ← NEW: External reference docs
-│   ├── prd.md
-│   ├── design-doc.md
-│   └── api-spec.yaml
+├── references/                     ← NEW: External reference docs
+│   ├── prd.md                     ← Full docs placed by user
+│   ├── api-spec.yaml
+│   └── .references-state.json     ← Manifest tracking incorporation state
 ├── spec.md
 ├── plan.md
 └── ...
 ```
+
+**Smart Loading** prevents context waste by tracking which references have already
+been incorporated into which artifacts. Instead of re-loading everything every time:
+- **NEW** refs → load full content
+- **MODIFIED** refs → load full + flag what changed
+- **INCORPORATED** refs → pass 1-2 sentence summary only
+- **ALREADY IN TARGET** → skip entirely
+
+See [07-smart-reference-loading.md](docs/study/07-smart-reference-loading.md) for full design.
 
 ---
 

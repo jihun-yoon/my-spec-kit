@@ -10,7 +10,7 @@ Spec-Kit provides 9 commands for AI agents to execute the Spec-Driven Developmen
 
 Every command follows this template:
 
-```yaml
+````yaml
 ---
 description: Brief description of what the command does
 handoffs:
@@ -26,6 +26,7 @@ agent_scripts:  # Optional: for updating agent context
   ps: scripts/powershell/update-agent-context.ps1 -AgentType __AGENT__
 ---
 
+
 ## User Input
 ```text
 $ARGUMENTS
@@ -35,7 +36,7 @@ You **MUST** consider the user input before proceeding (if not empty).
 
 ## Outline
 [Detailed execution steps...]
-```
+````
 
 ---
 

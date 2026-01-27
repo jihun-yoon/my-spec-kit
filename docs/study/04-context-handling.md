@@ -112,14 +112,14 @@ The system does NOT support:
 ### 1. User Input Extraction
 
 From command templates:
-```markdown
+````markdown
 ## User Input
 ```text
 $ARGUMENTS
 ```
 
 You **MUST** consider the user input before proceeding (if not empty).
-```
+````
 
 The text after the slash command becomes `$ARGUMENTS`:
 ```

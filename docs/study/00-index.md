@@ -17,6 +17,7 @@ This documentation provides a comprehensive analysis of the Spec-Kit repository 
 | [05-input-output-flows.md](05-input-output-flows.md) | Detailed I/O for each command and script |
 | [06-implementation-guide.md](06-implementation-guide.md) | **IMPLEMENTATION**: Code changes needed for reference docs |
 | [07-smart-reference-loading.md](07-smart-reference-loading.md) | **KEY**: Manifest + summary system to avoid context waste |
+| [08-cross-feature-references.md](08-cross-feature-references.md) | **KEY**: Two-tier system for sequential multi-feature development |
 
 ---
 

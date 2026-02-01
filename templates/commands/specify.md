@@ -1,6 +1,6 @@
 ---
 description: Create or update the feature specification from a natural language feature description.
-handoffs: 
+handoffs:
   - label: Build Technical Plan
     agent: speckit.plan
     prompt: Create a plan for the spec. I am building with...
@@ -11,6 +11,12 @@ handoffs:
 scripts:
   sh: scripts/bash/create-new-feature.sh --json "{ARGS}"
   ps: scripts/powershell/create-new-feature.ps1 -Json "{ARGS}"
+ref_scripts:
+  sh: scripts/bash/check-references.sh --json --command=specify --feature={FEATURE} --target=spec.md
+  ps: scripts/powershell/check-references.ps1 -Json -Command specify -Feature {FEATURE} -Target spec.md
+ref_update_scripts:
+  sh: scripts/bash/update-manifest.sh {REFS_DIR} {FEATURE} spec.md
+  ps: scripts/powershell/update-manifest.ps1 -RefsDir {REFS_DIR} -Feature {FEATURE} -Target spec.md
 ---
 
 ## User Input
@@ -26,6 +32,36 @@ You **MUST** consider the user input before proceeding (if not empty).
 The text the user typed after `/speckit.specify` in the triggering message **is** the feature description. Assume you always have it available in this conversation even if `{ARGS}` appears literally below. Do not ask the user to repeat it unless they provided an empty command.
 
 Given that feature description, do this:
+
+### Step 0: Load Reference Documents (Optional)
+
+Before starting the specification workflow, check for reference documents:
+
+1. **Check for references**: Run `{REF_SCRIPT}` (after creating the branch in step 1-2, replace `{FEATURE}` with the actual branch name).
+
+2. **Parse the JSON output**:
+   - If `sprint` is `null` → No references found, proceed to step 1 normally
+   - If `load` array is empty → All references already incorporated, proceed normally
+   - If `load` array has items → Read each file and use as context
+
+3. **Process references to load**:
+   For each item in the `load` array:
+   - Read the file at the `path` provided
+   - Note whether it's `NEW` or `MODIFIED` (state field)
+   - Use the content to inform your specification
+
+4. **Use reference context**:
+   - Extract requirements, constraints, and context from loaded docs
+   - Reference docs may contain PRDs, design documents, or other inputs
+   - Synthesize this context into the specification
+
+5. **Update manifest after completion**:
+   After writing the spec, run `{REF_UPDATE_SCRIPT}` to mark references as incorporated.
+   (Replace `{REFS_DIR}` with the `refs_dir` from the check-references output, `{FEATURE}` with branch name)
+
+**Note**: If no `references/sprint-*` directory exists, skip this step entirely.
+
+---
 
 1. **Generate a concise short name** (2-4 words) for the branch:
    - Analyze the feature description and extract the most meaningful keywords

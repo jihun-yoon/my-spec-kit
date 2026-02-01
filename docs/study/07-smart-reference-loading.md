@@ -5,26 +5,27 @@
 Loading all reference documents every time wastes context tokens. We need the agent
 to receive **only the right references** at each stage:
 
-- **Already-incorporated refs** (same feature) should NOT be re-loaded
-- **New refs** added after an artifact was created should be loaded in full
+- **Already-incorporated refs** should NOT be re-loaded
+- **New refs** added mid-sprint should be loaded in full
 - **Modified refs** (content changed) should be re-loaded
-- **Inherited refs** (from previous features) should be loaded fresh for each new feature
+- **No refs** is fine — system works without reference docs
 
 ---
 
 ## Design Principles
 
-1. **Script handles mechanics** — checksums, file detection are deterministic
-2. **No summaries** — artifacts themselves are the synthesis of references
-3. **Feature-scoped manifests** — each feature tracks its own incorporations
+1. **Sprint-based organization** — references grouped by development sprint
+2. **Fully optional** — works with or without reference docs
+3. **No summaries** — artifacts themselves are the synthesis
 4. **Simple states** — only 3 states: NEW, MODIFIED, INCORPORATED
+5. **Shared context** — features in same sprint share incorporation state
 
 ---
 
 ## Key Insight: Artifacts Are The Summaries
 
 ```
-Workflow within a feature:
+Workflow within a sprint:
   prd.md ─────→ spec.md ─────→ plan.md ─────→ tasks.md
          reads          reads          reads
 
@@ -34,27 +35,107 @@ When plan.md runs:
   - No need to summarize — the artifact IS the summary
 ```
 
-This eliminates the need for AI-generated summaries entirely.
+---
+
+## Directory Structure
+
+### Sprint-Based References (Optional)
+
+```
+project/
+├── references/
+│   ├── .current-sprint           ← Optional: override auto-detection
+│   │
+│   ├── sprint-1/                 ← Sprint 1 docs
+│   │   ├── prd.md
+│   │   ├── system-design.md
+│   │   └── .references-state.json
+│   │
+│   ├── sprint-3/                 ← Sprint 3 docs (sprint-2 had none)
+│   │   ├── security-req.md
+│   │   └── .references-state.json
+│   │
+│   └── _archive/                 ← Historical docs (ignored by script)
+│       └── old-prd.md
+│
+└── specs/
+    ├── 001-auth/                 ← Sprint 1 feature
+    ├── 002-dashboard/            ← Sprint 1 feature
+    ├── 003-profile/              ← Sprint 2 feature (no docs)
+    ├── 004-billing/              ← Sprint 3 feature
+    └── 005-notifications/        ← Sprint 3 feature
+```
+
+### No References (Also Valid)
+
+```
+project/
+├── references/                   ← Empty or doesn't exist
+└── specs/
+    └── 001-feature/              ← Normal speckit, no refs
+```
+
+---
+
+## Sprint Detection Logic
+
+```
+1. Does references/.current-sprint exist?
+   YES → Use specified sprint
+   NO  → Continue to auto-detect
+
+2. Find sprint directories (references/sprint-*/)
+   NONE → No reference loading (normal speckit)
+   FOUND → Use highest numbered sprint with files
+
+3. Does selected sprint directory have files?
+   NO  → No reference loading
+   YES → Load using state machine
+```
+
+**Auto-detect example:**
+```
+references/
+├── sprint-1/    (has files)
+├── sprint-2/    (empty)
+└── sprint-3/    (has files)
+
+→ Auto-selects sprint-3 (highest with files)
+```
+
+**Override example:**
+```bash
+echo "sprint-1" > references/.current-sprint
+→ Uses sprint-1 even though sprint-3 exists
+```
 
 ---
 
 ## Manifest Structure (`.references-state.json`)
 
-### Schema (v1) — No Summaries
+### Sprint-Scoped Manifest
+
+Each sprint has its own manifest tracking ALL features in that sprint:
 
 ```json
 {
   "version": 1,
+  "sprint": "sprint-1",
   "references": {
     "prd.md": {
       "checksum": "sha256:a1b2c3d4e5f6...",
       "size_bytes": 4200,
-      "incorporated_into": ["spec.md", "plan.md"]
+      "incorporated_into": {
+        "001-auth": ["spec.md", "plan.md"],
+        "002-dashboard": ["spec.md"]
+      }
     },
-    "api-contract.yaml": {
-      "checksum": "sha256:g7h8i9j0k1l2...",
-      "size_bytes": 2100,
-      "incorporated_into": ["spec.md"]
+    "system-design.md": {
+      "checksum": "sha256:x7y8z9...",
+      "size_bytes": 3100,
+      "incorporated_into": {
+        "001-auth": ["plan.md"]
+      }
     }
   }
 }
@@ -63,29 +144,24 @@ This eliminates the need for AI-generated summaries entirely.
 **What's tracked:**
 - `checksum` — detect modifications
 - `size_bytes` — logging/debugging
-- `incorporated_into` — list of artifacts that consumed this reference
-
-**What's NOT tracked:**
-- Summaries (artifacts contain the synthesis)
-- Timestamps (not needed for state detection)
-- Cross-feature references (each feature has its own manifest)
+- `incorporated_into` — map of feature → artifacts that consumed this ref
 
 ---
 
 ## Reference States
 
-Only 3 states needed:
+Only 3 states:
 
 | State | Condition | Action |
 |-------|-----------|--------|
 | `NEW` | Not in manifest | Load full |
 | `MODIFIED` | Checksum changed | Load full |
-| `INCORPORATED` | In manifest, unchanged | Skip |
+| `INCORPORATED` | In manifest for this feature, unchanged | Skip |
 
 ### State Detection Logic
 
 ```
-For each reference file R and target artifact A in current feature:
+For reference R, feature F, artifact A in current sprint:
 
 1. Is R in the manifest?
    NO  → State = NEW → Load full
@@ -93,41 +169,14 @@ For each reference file R and target artifact A in current feature:
 2. Has R been modified? (current checksum ≠ manifest checksum)
    YES → State = MODIFIED → Load full
 
-3. Otherwise:
-   State = INCORPORATED → Skip (artifact chain has the synthesis)
+3. Was R incorporated into THIS feature (F)?
+   YES → State = INCORPORATED → Skip
+
+4. Was R incorporated into ANOTHER feature in same sprint?
+   YES → State = INCORPORATED → Skip (sprint features share context)
 ```
 
----
-
-## Cross-Feature Behavior
-
-**Different features may need different parts of the same reference.**
-
-| Scope | Behavior | Reason |
-|-------|----------|--------|
-| **Same feature** | Skip incorporated refs | Artifacts have synthesis |
-| **New feature** | Load all refs fresh | May need different sections |
-
-### Example: Large PRD Across Features
-
-```
-references/master-prd.md (10KB)
-├── Section: Authentication
-├── Section: Dashboard
-├── Section: Billing
-
-Feature 001-auth:
-  master-prd.md → NEW → Load full
-  spec.md extracts auth info
-  plan.md → INCORPORATED → Skip (spec.md has auth synthesis)
-
-Feature 002-dashboard (new feature, fresh manifest):
-  master-prd.md → NEW → Load full (fresh manifest!)
-  spec.md extracts dashboard info (different section)
-  plan.md → INCORPORATED → Skip
-```
-
-Each feature pays the "load full" cost **once**, then skips for subsequent artifacts.
+**Key:** Features within the same sprint share incorporation state.
 
 ---
 
@@ -137,19 +186,22 @@ Each feature pays the "load full" cost **once**, then skips for subsequent artif
 
 ```bash
 #!/usr/bin/env bash
-# Determines reference loading strategy for a given target artifact
-# Script handles ALL mechanical work - checksums, file detection, state computation
+# Determines reference loading strategy
+# Supports sprint-based organization with auto-detection
 
 set -e
 
 TARGET_ARTIFACT=""
 JSON_MODE=false
+FEATURE_NAME=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --json) JSON_MODE=true; shift ;;
         --target) TARGET_ARTIFACT="$2"; shift 2 ;;
         --target=*) TARGET_ARTIFACT="${1#*=}"; shift ;;
+        --feature) FEATURE_NAME="$2"; shift 2 ;;
+        --feature=*) FEATURE_NAME="${1#*=}"; shift ;;
         *) shift ;;
     esac
 done
@@ -158,14 +210,49 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/common.sh"
 eval $(get_feature_paths)
 
-REFS_DIR="$FEATURE_DIR/references"
+REFS_BASE="$REPO_ROOT/references"
+CURRENT_SPRINT=""
+REFS_DIR=""
+
+# Auto-detect feature name from branch if not provided
+[[ -z "$FEATURE_NAME" ]] && FEATURE_NAME="$CURRENT_BRANCH"
+
+# ── Determine current sprint ──
+
+# Check for explicit override
+if [[ -f "$REFS_BASE/.current-sprint" ]]; then
+    CURRENT_SPRINT=$(cat "$REFS_BASE/.current-sprint" | tr -d '[:space:]')
+fi
+
+# Auto-detect if no override
+if [[ -z "$CURRENT_SPRINT" ]]; then
+    # Find highest numbered sprint directory with files
+    for dir in "$REFS_BASE"/sprint-*; do
+        [[ -d "$dir" ]] || continue
+        # Check if directory has files (excluding manifest)
+        file_count=$(find "$dir" -maxdepth 1 -type f ! -name ".references-state.json" | wc -l)
+        if [[ "$file_count" -gt 0 ]]; then
+            CURRENT_SPRINT=$(basename "$dir")
+        fi
+    done
+fi
+
+# ── No sprint found → no reference loading ──
+
+if [[ -z "$CURRENT_SPRINT" ]]; then
+    if $JSON_MODE; then
+        echo '{"sprint":null,"load":[],"skip":[],"message":"No sprint references found"}'
+    fi
+    exit 0
+fi
+
+REFS_DIR="$REFS_BASE/$CURRENT_SPRINT"
 MANIFEST="$REFS_DIR/.references-state.json"
 
 # Initialize empty manifest if missing
-[[ -d "$REFS_DIR" ]] || mkdir -p "$REFS_DIR"
-[[ -f "$MANIFEST" ]] || echo '{"version":1,"references":{}}' > "$MANIFEST"
+[[ -f "$MANIFEST" ]] || echo "{\"version\":1,\"sprint\":\"$CURRENT_SPRINT\",\"references\":{}}" > "$MANIFEST"
 
-# Compute checksum for a file
+# Compute checksum
 compute_checksum() {
     shasum -a 256 "$1" 2>/dev/null | cut -d' ' -f1
 }
@@ -184,16 +271,20 @@ for file in "$REFS_DIR"/*; do
 
     # Check manifest state
     manifest_checksum=$(jq -r ".references[\"$filename\"].checksum // \"\"" "$MANIFEST")
+    incorporated=$(jq -r ".references[\"$filename\"].incorporated_into | keys | length" "$MANIFEST")
 
     if [[ -z "$manifest_checksum" ]]; then
         # NEW: not in manifest
-        load_full+=("{\"file\":\"$filename\",\"size\":$file_size,\"state\":\"NEW\"}")
+        load_full+=("{\"file\":\"$filename\",\"path\":\"$file\",\"size\":$file_size,\"state\":\"NEW\"}")
     elif [[ "$current_checksum" != "$manifest_checksum" ]]; then
         # MODIFIED: checksum changed
-        load_full+=("{\"file\":\"$filename\",\"size\":$file_size,\"state\":\"MODIFIED\"}")
-    else
-        # INCORPORATED: already processed in this feature
+        load_full+=("{\"file\":\"$filename\",\"path\":\"$file\",\"size\":$file_size,\"state\":\"MODIFIED\"}")
+    elif [[ "$incorporated" -gt 0 ]]; then
+        # INCORPORATED: already processed in this sprint
         skip+=("$filename")
+    else
+        # Fallback: treat as NEW
+        load_full+=("{\"file\":\"$filename\",\"path\":\"$file\",\"size\":$file_size,\"state\":\"NEW\"}")
     fi
 done
 
@@ -201,9 +292,10 @@ done
 if $JSON_MODE; then
     cat <<EOF
 {
-  "target": "$TARGET_ARTIFACT",
-  "feature_dir": "$FEATURE_DIR",
+  "sprint": "$CURRENT_SPRINT",
   "refs_dir": "$REFS_DIR",
+  "feature": "$FEATURE_NAME",
+  "target": "$TARGET_ARTIFACT",
   "load": [$(IFS=,; echo "${load_full[*]}")],
   "skip": $(printf '%s\n' "${skip[@]}" | jq -R . | jq -s .)
 }
@@ -215,15 +307,17 @@ fi
 
 ```bash
 #!/usr/bin/env bash
-# Updates manifest after command execution
-# No summaries - just records what was incorporated
+# Updates sprint manifest after command execution
 
 set -e
 
 REFS_DIR="$1"
-TARGET_ARTIFACT="$2"
+FEATURE_NAME="$2"
+TARGET_ARTIFACT="$3"
 
 MANIFEST="$REFS_DIR/.references-state.json"
+
+[[ -f "$MANIFEST" ]] || exit 0
 
 # For each file in references, update manifest
 for file in "$REFS_DIR"/*; do
@@ -234,16 +328,16 @@ for file in "$REFS_DIR"/*; do
     checksum=$(shasum -a 256 "$file" | cut -d' ' -f1)
     size=$(stat -f%z "$file" 2>/dev/null || stat -c%s "$file")
 
-    # Update manifest entry - add target to incorporated_into array
+    # Update manifest: add artifact to feature's incorporated list
     jq --arg f "$filename" \
        --arg c "$checksum" \
        --arg s "$size" \
-       --arg t "$TARGET_ARTIFACT" \
-       '.references[$f] = {
-          checksum: $c,
-          size_bytes: ($s | tonumber),
-          incorporated_into: ((.references[$f].incorporated_into // []) + [$t] | unique)
-        }' "$MANIFEST" > "$MANIFEST.tmp" && mv "$MANIFEST.tmp" "$MANIFEST"
+       --arg feat "$FEATURE_NAME" \
+       --arg art "$TARGET_ARTIFACT" \
+       '.references[$f].checksum = $c |
+        .references[$f].size_bytes = ($s | tonumber) |
+        .references[$f].incorporated_into[$feat] = ((.references[$f].incorporated_into[$feat] // []) + [$art] | unique)' \
+       "$MANIFEST" > "$MANIFEST.tmp" && mv "$MANIFEST.tmp" "$MANIFEST"
 done
 ```
 
@@ -251,31 +345,139 @@ done
 
 ## Command Template Integration
 
-Each command includes this reference loading protocol:
-
 ```markdown
 ## Reference Loading Protocol
 
-### Step 1: Get Loading Plan
-Run `check-references.sh --json --target={artifact}` and parse the output.
+### Step 1: Check for References
+Run `check-references.sh --json --feature={feature} --target={artifact}`
+
+If `sprint` is null → no references, proceed with normal speckit workflow.
 
 ### Step 2: Process References
 
 **load** array (NEW or MODIFIED):
-- Read entire file content
+- Read entire file content from the path provided
 - These provide new context for the current artifact
 
 **skip** array (INCORPORATED):
 - Do NOT read these files
-- Their content is already synthesized in earlier artifacts
-- Read those artifacts instead (spec.md, plan.md, etc.)
+- Already synthesized into earlier artifacts in this sprint
+- Read those artifacts for context instead
 
 ### Step 3: Generate Artifact
-Use the loaded references + earlier artifacts to inform your output.
+Use loaded references + earlier artifacts to inform your output.
 
 ### Step 4: Update Manifest
-Run `update-manifest.sh {refs_dir} {artifact}` to record incorporation.
+Run `update-manifest.sh {refs_dir} {feature} {artifact}`
 ```
+
+---
+
+## User Workflows
+
+### Workflow A: Sprint with Docs
+
+```bash
+# Start sprint 1 with design docs
+mkdir -p references/sprint-1
+cp ~/docs/prd.md references/sprint-1/
+cp ~/docs/architecture.md references/sprint-1/
+
+# Build features (docs auto-loaded)
+/speckit.specify "Build auth system"      # 001-auth, loads both docs
+/speckit.specify "Build dashboard"        # 002-dashboard, skips (incorporated)
+```
+
+### Workflow B: Sprint without Docs
+
+```bash
+# Sprint 2: no docs needed
+echo "sprint-2" > references/.current-sprint
+# Or just don't create sprint-2/ directory
+
+/speckit.specify "Add logging"            # Normal speckit, no refs
+/speckit.specify "Add monitoring"         # Normal speckit, no refs
+```
+
+### Workflow C: New Sprint with New Docs
+
+```bash
+# Sprint 3: new requirements
+mkdir -p references/sprint-3
+cp ~/docs/security-requirements.md references/sprint-3/
+
+# Auto-detects sprint-3 (highest with files)
+/speckit.specify "Add security layer"     # 004-security, loads new doc
+```
+
+### Workflow D: Override Sprint
+
+```bash
+# Force use of sprint-1 docs for a new feature
+echo "sprint-1" > references/.current-sprint
+/speckit.specify "Revisit auth"           # Uses sprint-1 docs
+```
+
+---
+
+## Simulation: Multi-Sprint Workflow
+
+### Sprint 1: Initial Development
+
+```
+references/sprint-1/
+├── prd.md (5000 bytes)
+├── architecture.md (3000 bytes)
+└── .references-state.json (empty)
+```
+
+| Command | Feature | Reference | State | Context |
+|---------|---------|-----------|-------|---------|
+| specify | 001-auth | prd.md | NEW | 5000 |
+| specify | 001-auth | architecture.md | NEW | 3000 |
+| plan | 001-auth | both | INCORPORATED | 0 |
+| specify | 002-dashboard | both | INCORPORATED | 0 |
+
+**Sprint 1 total: 8000 bytes** (loaded once, shared across features)
+
+### Sprint 2: No Docs
+
+```
+references/sprint-2/ (doesn't exist)
+```
+
+| Command | Feature | Reference | State | Context |
+|---------|---------|-----------|-------|---------|
+| specify | 003-profile | (none) | — | 0 |
+| plan | 003-profile | (none) | — | 0 |
+
+**Sprint 2 total: 0 bytes** (no reference loading)
+
+### Sprint 3: New Requirements
+
+```
+references/sprint-3/
+├── security-req.md (4000 bytes)
+└── .references-state.json (empty)
+```
+
+| Command | Feature | Reference | State | Context |
+|---------|---------|-----------|-------|---------|
+| specify | 004-security | security-req.md | NEW | 4000 |
+| specify | 005-compliance | security-req.md | INCORPORATED | 0 |
+
+**Sprint 3 total: 4000 bytes** (loaded once)
+
+---
+
+## Context Budget Summary
+
+| Sprint | Features | Docs | Without Smart Loading | With Smart Loading | Savings |
+|--------|----------|------|----------------------|-------------------|---------|
+| 1 | 2 | 2 | 16,000 | 8,000 | **50%** |
+| 2 | 1 | 0 | 0 | 0 | — |
+| 3 | 2 | 1 | 8,000 | 4,000 | **50%** |
+| **Total** | **5** | **3** | **24,000** | **12,000** | **50%** |
 
 ---
 
@@ -283,132 +485,52 @@ Run `update-manifest.sh {refs_dir} {artifact}` to record incorporation.
 
 ### Force Full Load
 ```bash
-# Delete manifest to treat all refs as NEW
-rm specs/001-feature/references/.references-state.json
+# Delete sprint manifest to treat all refs as NEW
+rm references/sprint-1/.references-state.json
 ```
 
-Next command will load all references fresh.
+### Switch Sprints
+```bash
+# Explicitly set current sprint
+echo "sprint-1" > references/.current-sprint
+```
 
 ### Inspect State
 ```bash
 # See what's been incorporated
-cat specs/001-feature/references/.references-state.json | jq .
+cat references/sprint-1/.references-state.json | jq .
 ```
 
-### Debug Loading Decisions
+### Debug Loading
 ```bash
 # Dry-run: see what would be loaded
-./scripts/bash/check-references.sh --json --target=plan.md
+./scripts/bash/check-references.sh --json --feature=001-auth --target=spec.md
 ```
 
----
-
-## Simulation: Full Workflow
-
-### Setup
+### Archive Old Docs
+```bash
+# Move to _archive/ (ignored by script)
+mv references/sprint-1/old-doc.md references/_archive/
 ```
-specs/001-oauth-auth/
-├── references/
-│   ├── prd.md                    (4200 bytes)
-│   ├── api-contract.yaml         (2100 bytes)
-│   └── .references-state.json    (empty)
-```
-
-### Step 1: `/speckit.specify`
-
-| Reference | State | Action |
-|-----------|-------|--------|
-| prd.md | NEW | Load full (4200 bytes) |
-| api-contract.yaml | NEW | Load full (2100 bytes) |
-
-**Context used: 6300 bytes**
-
-After: manifest records both files incorporated into spec.md
-
-### Step 2: `/speckit.plan`
-
-| Reference | State | Action |
-|-----------|-------|--------|
-| prd.md | INCORPORATED | Skip |
-| api-contract.yaml | INCORPORATED | Skip |
-
-**Context used: 0 bytes** (reads spec.md instead, which has the synthesis)
-
-### Step 3: User adds `security-req.md`
-
-### Step 4: `/speckit.tasks`
-
-| Reference | State | Action |
-|-----------|-------|--------|
-| prd.md | INCORPORATED | Skip |
-| api-contract.yaml | INCORPORATED | Skip |
-| security-req.md | NEW | Load full (3500 bytes) |
-
-**Context used: 3500 bytes**
-
-### Step 5: User modifies `prd.md`
-
-### Step 6: `/speckit.implement`
-
-| Reference | State | Action |
-|-----------|-------|--------|
-| prd.md | MODIFIED | Load full (4500 bytes) |
-| api-contract.yaml | INCORPORATED | Skip |
-| security-req.md | INCORPORATED | Skip |
-
-**Context used: 4500 bytes**
-
----
-
-## Context Budget Summary
-
-| Command | Without Smart Loading | With Smart Loading | Savings |
-|---------|----------------------|-------------------|---------|
-| specify | 6,300 | 6,300 | 0% |
-| plan | 6,300 | 0 | **100%** |
-| tasks | 9,800 | 3,500 | **64%** |
-| implement | 10,100 | 4,500 | **55%** |
-| **Total** | **32,500** | **14,300** | **56%** |
-
----
-
-## Cross-Feature Simulation
-
-### Feature 001 Complete, Starting Feature 002
-
-```
-specs/001-auth/references/.references-state.json  ← has prd.md incorporated
-specs/002-dashboard/references/                    ← empty, fresh manifest
-```
-
-### Feature 002: `/speckit.specify`
-
-| Reference | Source | State | Action |
-|-----------|--------|-------|--------|
-| prd.md | copied to 002/references/ | NEW | Load full |
-
-**Why load full?** Feature 002 has its own manifest. The same `prd.md` is NEW
-to this feature because 002's manifest is empty. Dashboard feature may need
-different sections of the PRD than auth feature did.
 
 ---
 
 ## Testing Strategy
 
 ### Unit Tests
-- `test_state_detection.sh`: Given manifest + files, verify correct state
-- `test_checksum_computation.sh`: Verify checksums are stable
-- `test_manifest_update.sh`: Verify incorporated_into array updates correctly
+- `test_sprint_detection.sh`: Auto-detect vs explicit override
+- `test_state_detection.sh`: NEW/MODIFIED/INCORPORATED states
+- `test_no_refs.sh`: Graceful handling when no references exist
 
 ### Integration Tests
-- Full workflow with mock references → verify context savings
-- Simulate file modifications → verify MODIFIED detection
-- New feature with inherited files → verify fresh loading
+- Multi-sprint workflow with shared docs
+- Sprint without docs → normal speckit behavior
+- Feature in sprint shares incorporation with other features
 
-### Property-Based Tests
-- State machine transitions are deterministic
-- Manifest incorporated_into is append-only within a feature
-- Checksums always match file content
+### Edge Cases
+- Empty sprint directory → no loading
+- Missing `.current-sprint` with multiple sprint dirs → use highest
+- Manifest exists but reference file deleted → handle gracefully
 
 ---
 
@@ -416,10 +538,9 @@ different sections of the PRD than auth feature did.
 
 | File | Change |
 |------|--------|
-| `scripts/bash/check-references.sh` | **NEW**: Pre-command state detection |
-| `scripts/bash/update-manifest.sh` | **NEW**: Post-command manifest update |
-| `scripts/bash/common.sh` | Add `REFERENCES_DIR` to paths |
-| `scripts/bash/create-new-feature.sh` | Create `references/` directory |
+| `scripts/bash/check-references.sh` | **NEW**: Sprint-aware state detection |
+| `scripts/bash/update-manifest.sh` | **NEW**: Sprint manifest update |
+| `scripts/bash/common.sh` | Add `REFS_BASE` to paths |
 | `scripts/powershell/*` | PowerShell equivalents |
 | `templates/commands/*.md` | Add reference loading protocol |
 
@@ -428,18 +549,19 @@ different sections of the PRD than auth feature did.
 ## Phased Implementation
 
 ### Phase 1: MVP (Ship First)
-- `check-references.sh` with state detection
+- `check-references.sh` with sprint detection
 - Basic manifest schema (v1, no summaries)
 - Integration into `specify.md` and `plan.md` only
+- Auto-detect current sprint
 
 ### Phase 2: Full Command Coverage
 - Add to all commands
-- `update-manifest.sh` for post-command updates
-- `--force-load-refs` flag for escape hatch
+- `update-manifest.sh` for manifest updates
+- `--refs` filter flag for power users
 
-### Phase 3: Cross-Feature Enhancement (If Needed)
-- Project-level `references/` directory
-- Three-source scanning (doc 09)
+### Phase 3: Enhancements (If Needed)
 - Observability and metrics
+- Sprint history/comparison tools
+- Cross-sprint reference inheritance
 
 Start with Phase 1. Add complexity only when users hit real problems.

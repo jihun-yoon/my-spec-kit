@@ -5,24 +5,42 @@
 Loading all reference documents every time wastes context tokens. We need the agent
 to receive **only the right references** at each stage:
 
-- **Already-incorporated refs** should NOT be re-loaded in full
+- **Already-incorporated refs** (same feature) should NOT be re-loaded
 - **New refs** added after an artifact was created should be loaded in full
-- **Modified refs** (content changed since incorporation) should be flagged and re-loaded
+- **Modified refs** (content changed) should be re-loaded
+- **Inherited refs** (from previous features) should be loaded fresh for each new feature
 
 ---
 
 ## Design Principles
 
-1. **Script handles mechanics** — checksums, timestamps, file detection are deterministic
-2. **AI handles semantics** — only the summary field requires AI intelligence
-3. **Validation catches drift** — post-command validation ensures consistency
-4. **Simple first** — start with minimal schema, add complexity only when needed
+1. **Script handles mechanics** — checksums, file detection are deterministic
+2. **No summaries** — artifacts themselves are the synthesis of references
+3. **Feature-scoped manifests** — each feature tracks its own incorporations
+4. **Simple states** — only 3 states: NEW, MODIFIED, INCORPORATED
+
+---
+
+## Key Insight: Artifacts Are The Summaries
+
+```
+Workflow within a feature:
+  prd.md ─────→ spec.md ─────→ plan.md ─────→ tasks.md
+         reads          reads          reads
+
+When plan.md runs:
+  - It reads spec.md (which already synthesized prd.md)
+  - spec.md contains the relevant extracted info
+  - No need to summarize — the artifact IS the summary
+```
+
+This eliminates the need for AI-generated summaries entirely.
 
 ---
 
 ## Manifest Structure (`.references-state.json`)
 
-### Simplified Schema (v1)
+### Schema (v1) — No Summaries
 
 ```json
 {
@@ -31,88 +49,85 @@ to receive **only the right references** at each stage:
     "prd.md": {
       "checksum": "sha256:a1b2c3d4e5f6...",
       "size_bytes": 4200,
-      "incorporated_into": {
-        "spec.md": {
-          "checksum_at_incorporation": "sha256:a1b2c3d4e5f6...",
-          "summary": ""
-        }
-      }
+      "incorporated_into": ["spec.md", "plan.md"]
+    },
+    "api-contract.yaml": {
+      "checksum": "sha256:g7h8i9j0k1l2...",
+      "size_bytes": 2100,
+      "incorporated_into": ["spec.md"]
     }
   }
 }
 ```
 
-### Key Design Decision: Script-Writes, AI-Fills
+**What's tracked:**
+- `checksum` — detect modifications
+- `size_bytes` — logging/debugging
+- `incorporated_into` — list of artifacts that consumed this reference
 
-**Problem with AI-written manifests:**
-- AI can hallucinate checksums
-- AI can forget to update the manifest
-- AI output is non-deterministic
-- Debugging "why did it load this?" is hard
-
-**Solution: Invert ownership**
-
-```
-BEFORE (fragile):
-  AI writes full JSON → Script validates afterward
-
-AFTER (robust):
-  Script writes JSON skeleton → AI fills ONLY summary field → Script finalizes
-```
-
-**Manifest Lifecycle:**
-
-```
-1. PRE-COMMAND: check-references.sh
-   - Scans references/ directory
-   - Computes checksums for all files
-   - Reads existing manifest
-   - Determines state (NEW/MODIFIED/INCORPORATED/SKIP)
-   - Outputs loading plan as JSON
-
-2. COMMAND EXECUTION: AI processes references
-   - Receives loading plan
-   - Reads files as instructed
-   - Generates artifact
-   - Produces summaries for each reference used
-
-3. POST-COMMAND: update-manifest.sh
-   - Receives summaries from AI (via structured output)
-   - Writes mechanical fields (checksum, timestamp)
-   - Inserts AI summaries into correct locations
-   - Validates final manifest structure
-```
-
-This reduces AI's blast radius to **just the summary text**, which is the least critical field.
+**What's NOT tracked:**
+- Summaries (artifacts contain the synthesis)
+- Timestamps (not needed for state detection)
+- Cross-feature references (each feature has its own manifest)
 
 ---
 
 ## Reference States
 
-A reference can be in one of four states relative to a command:
+Only 3 states needed:
 
-| State | Meaning | What Agent Receives |
-|-------|---------|---------------------|
-| `NEW` | File not in manifest | Full content |
-| `MODIFIED` | Checksum changed since last incorporation | Full content + previous summaries |
-| `INCORPORATED_ELSEWHERE` | In manifest, used by other artifacts | Summary only |
-| `ALREADY_INCORPORATED` | Already consumed by target artifact | Nothing (skip) |
+| State | Condition | Action |
+|-------|-----------|--------|
+| `NEW` | Not in manifest | Load full |
+| `MODIFIED` | Checksum changed | Load full |
+| `INCORPORATED` | In manifest, unchanged | Skip |
 
 ### State Detection Logic
 
 ```
-For each reference file R and target artifact A:
+For each reference file R and target artifact A in current feature:
 
 1. Is R in the manifest?
-   NO  → State = NEW
+   NO  → State = NEW → Load full
 
 2. Has R been modified? (current checksum ≠ manifest checksum)
-   YES → State = MODIFIED
+   YES → State = MODIFIED → Load full
 
-3. Has R been incorporated into artifact A?
-   YES → State = ALREADY_INCORPORATED
-   NO  → State = INCORPORATED_ELSEWHERE
+3. Otherwise:
+   State = INCORPORATED → Skip (artifact chain has the synthesis)
 ```
+
+---
+
+## Cross-Feature Behavior
+
+**Different features may need different parts of the same reference.**
+
+| Scope | Behavior | Reason |
+|-------|----------|--------|
+| **Same feature** | Skip incorporated refs | Artifacts have synthesis |
+| **New feature** | Load all refs fresh | May need different sections |
+
+### Example: Large PRD Across Features
+
+```
+references/master-prd.md (10KB)
+├── Section: Authentication
+├── Section: Dashboard
+├── Section: Billing
+
+Feature 001-auth:
+  master-prd.md → NEW → Load full
+  spec.md extracts auth info
+  plan.md → INCORPORATED → Skip (spec.md has auth synthesis)
+
+Feature 002-dashboard (new feature, fresh manifest):
+  master-prd.md → NEW → Load full (fresh manifest!)
+  spec.md extracts dashboard info (different section)
+  plan.md → INCORPORATED → Skip
+```
+
+Each feature pays the "load full" cost **once**, then skips for subsequent artifacts.
 
 ---
 
@@ -123,7 +138,7 @@ For each reference file R and target artifact A:
 ```bash
 #!/usr/bin/env bash
 # Determines reference loading strategy for a given target artifact
-# ALL mechanical work happens here - checksums, file detection, state computation
+# Script handles ALL mechanical work - checksums, file detection, state computation
 
 set -e
 
@@ -157,8 +172,6 @@ compute_checksum() {
 
 # Build loading plan
 load_full=()
-load_modified=()
-summaries_only=()
 skip=()
 
 for file in "$REFS_DIR"/*; do
@@ -167,27 +180,20 @@ for file in "$REFS_DIR"/*; do
 
     filename=$(basename "$file")
     current_checksum=$(compute_checksum "$file")
+    file_size=$(stat -f%z "$file" 2>/dev/null || stat -c%s "$file")
 
     # Check manifest state
     manifest_checksum=$(jq -r ".references[\"$filename\"].checksum // \"\"" "$MANIFEST")
-    incorporated_into_target=$(jq -r ".references[\"$filename\"].incorporated_into[\"$TARGET_ARTIFACT\"] // null" "$MANIFEST")
-    incorporated_anywhere=$(jq -r ".references[\"$filename\"].incorporated_into | length" "$MANIFEST")
 
     if [[ -z "$manifest_checksum" ]]; then
         # NEW: not in manifest
-        load_full+=("$filename")
+        load_full+=("{\"file\":\"$filename\",\"size\":$file_size,\"state\":\"NEW\"}")
     elif [[ "$current_checksum" != "$manifest_checksum" ]]; then
         # MODIFIED: checksum changed
-        load_modified+=("$filename")
-    elif [[ "$incorporated_into_target" != "null" ]]; then
-        # ALREADY_INCORPORATED: in target artifact
-        skip+=("$filename")
-    elif [[ "$incorporated_anywhere" -gt 0 ]]; then
-        # INCORPORATED_ELSEWHERE: in other artifacts
-        summaries_only+=("$filename")
+        load_full+=("{\"file\":\"$filename\",\"size\":$file_size,\"state\":\"MODIFIED\"}")
     else
-        # Fallback: treat as NEW
-        load_full+=("$filename")
+        # INCORPORATED: already processed in this feature
+        skip+=("$filename")
     fi
 done
 
@@ -197,9 +203,8 @@ if $JSON_MODE; then
 {
   "target": "$TARGET_ARTIFACT",
   "feature_dir": "$FEATURE_DIR",
-  "load_full": $(printf '%s\n' "${load_full[@]}" | jq -R . | jq -s .),
-  "load_modified": $(printf '%s\n' "${load_modified[@]}" | jq -R . | jq -s .),
-  "summaries_only": $(printf '%s\n' "${summaries_only[@]}" | jq -R . | jq -s .),
+  "refs_dir": "$REFS_DIR",
+  "load": [$(IFS=,; echo "${load_full[*]}")],
   "skip": $(printf '%s\n' "${skip[@]}" | jq -R . | jq -s .)
 }
 EOF
@@ -210,19 +215,17 @@ fi
 
 ```bash
 #!/usr/bin/env bash
-# Updates manifest with AI-provided summaries
-# Script handles ALL mechanical fields; AI provides ONLY summaries
+# Updates manifest after command execution
+# No summaries - just records what was incorporated
 
 set -e
 
 REFS_DIR="$1"
 TARGET_ARTIFACT="$2"
-SUMMARIES_JSON="$3"  # JSON object: {"prd.md": "summary text", ...}
 
 MANIFEST="$REFS_DIR/.references-state.json"
-TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
-# For each file that was processed, update manifest
+# For each file in references, update manifest
 for file in "$REFS_DIR"/*; do
     [[ -f "$file" ]] || continue
     [[ "$(basename "$file")" == ".references-state.json" ]] && continue
@@ -231,26 +234,15 @@ for file in "$REFS_DIR"/*; do
     checksum=$(shasum -a 256 "$file" | cut -d' ' -f1)
     size=$(stat -f%z "$file" 2>/dev/null || stat -c%s "$file")
 
-    # Get summary from AI output (empty string if not provided)
-    summary=$(echo "$SUMMARIES_JSON" | jq -r ".[\"$filename\"] // \"\"")
-
-    # Update manifest entry
+    # Update manifest entry - add target to incorporated_into array
     jq --arg f "$filename" \
        --arg c "$checksum" \
        --arg s "$size" \
        --arg t "$TARGET_ARTIFACT" \
-       --arg ts "$TIMESTAMP" \
-       --arg sum "$summary" \
        '.references[$f] = {
           checksum: $c,
           size_bytes: ($s | tonumber),
-          incorporated_into: ((.references[$f].incorporated_into // {}) + {
-            ($t): {
-              checksum_at_incorporation: $c,
-              timestamp: $ts,
-              summary: $sum
-            }
-          })
+          incorporated_into: ((.references[$f].incorporated_into // []) + [$t] | unique)
         }' "$MANIFEST" > "$MANIFEST.tmp" && mv "$MANIFEST.tmp" "$MANIFEST"
 done
 ```
@@ -265,45 +257,24 @@ Each command includes this reference loading protocol:
 ## Reference Loading Protocol
 
 ### Step 1: Get Loading Plan
-Run `{SCRIPT_CHECK_REFS}` and parse the JSON output.
+Run `check-references.sh --json --target={artifact}` and parse the output.
 
-### Step 2: Process References by Category
+### Step 2: Process References
 
-**load_full** (NEW references):
+**load** array (NEW or MODIFIED):
 - Read entire file content
-- This is new context not yet incorporated anywhere
+- These provide new context for the current artifact
 
-**load_modified** (MODIFIED references):
-- Read entire file content
-- ⚠️ Content changed since last incorporation
-- Review what's new compared to previous summaries
-
-**summaries_only** (INCORPORATED_ELSEWHERE):
-- Do NOT read the file
-- Use the summary from the manifest for context
-- These were already synthesized into earlier artifacts
-
-**skip** (ALREADY_INCORPORATED):
-- Ignore entirely
-- Already in the artifact you're generating
+**skip** array (INCORPORATED):
+- Do NOT read these files
+- Their content is already synthesized in earlier artifacts
+- Read those artifacts instead (spec.md, plan.md, etc.)
 
 ### Step 3: Generate Artifact
-Use the loaded references to inform your output.
+Use the loaded references + earlier artifacts to inform your output.
 
-### Step 4: Provide Summaries
-For each reference you processed (load_full or load_modified), provide a 1-2
-sentence summary of what you extracted. Output as JSON:
-
-```json
-{
-  "reference_summaries": {
-    "prd.md": "Defines OAuth2 flow with Google/GitHub, 3 user roles, 3 journeys.",
-    "security-req.md": "Requires OWASP top-10 compliance, rate limiting."
-  }
-}
-```
-
-The post-command script will update the manifest with your summaries.
+### Step 4: Update Manifest
+Run `update-manifest.sh {refs_dir} {artifact}` to record incorporation.
 ```
 
 ---
@@ -312,53 +283,23 @@ The post-command script will update the manifest with your summaries.
 
 ### Force Full Load
 ```bash
-# Ignore manifest, load all references fully
-/speckit.plan --force-load-refs
-```
-
-Command template checks for this flag and loads everything as NEW.
-
-### Clear Summaries
-```bash
-# Reset manifest to empty state
+# Delete manifest to treat all refs as NEW
 rm specs/001-feature/references/.references-state.json
 ```
 
-Next command will treat all refs as NEW.
+Next command will load all references fresh.
 
 ### Inspect State
 ```bash
-# See what the AI "knows" about each reference
-cat specs/001-feature/references/.references-state.json | jq '.references | to_entries[] | {file: .key, summaries: .value.incorporated_into}'
+# See what's been incorporated
+cat specs/001-feature/references/.references-state.json | jq .
 ```
 
 ### Debug Loading Decisions
 ```bash
-# Dry-run: see what would be loaded without running command
-./scripts/bash/check-references.sh --json --target=plan.md | jq .
+# Dry-run: see what would be loaded
+./scripts/bash/check-references.sh --json --target=plan.md
 ```
-
----
-
-## Observability
-
-### Logging
-Each command logs reference loading decisions:
-
-```
-[refs] Loading plan for target: plan.md
-[refs]   NEW: security-requirements.md (3500 bytes)
-[refs]   MODIFIED: prd.md (4200 bytes, was a1b2c3, now p6q7r8)
-[refs]   SUMMARY: api-contract.yaml → "4 auth endpoints: login, register, me, refresh."
-[refs]   SKIP: (none)
-[refs] Total context: 7700 bytes (saved 2400 bytes vs full load)
-```
-
-### Metrics (Future)
-Track across sessions:
-- Total bytes saved by smart loading
-- Summary hit rate (how often summaries are sufficient)
-- Modification frequency (how often refs change mid-feature)
 
 ---
 
@@ -382,40 +323,40 @@ specs/001-oauth-auth/
 
 **Context used: 6300 bytes**
 
-After: manifest updated with checksums + AI summaries for spec.md
+After: manifest records both files incorporated into spec.md
 
-### Step 2: `/speckit.clarify`
+### Step 2: `/speckit.plan`
 
 | Reference | State | Action |
 |-----------|-------|--------|
-| prd.md | ALREADY_INCORPORATED | Skip |
-| api-contract.yaml | ALREADY_INCORPORATED | Skip |
+| prd.md | INCORPORATED | Skip |
+| api-contract.yaml | INCORPORATED | Skip |
 
-**Context used: 0 bytes** (100% savings)
+**Context used: 0 bytes** (reads spec.md instead, which has the synthesis)
 
 ### Step 3: User adds `security-req.md`
 
-### Step 4: `/speckit.plan`
+### Step 4: `/speckit.tasks`
 
 | Reference | State | Action |
 |-----------|-------|--------|
-| prd.md | INCORPORATED_ELSEWHERE | Summary only (~80 bytes) |
-| api-contract.yaml | INCORPORATED_ELSEWHERE | Summary only (~60 bytes) |
+| prd.md | INCORPORATED | Skip |
+| api-contract.yaml | INCORPORATED | Skip |
 | security-req.md | NEW | Load full (3500 bytes) |
 
-**Context used: 3640 bytes** (63% savings vs 9800)
+**Context used: 3500 bytes**
 
 ### Step 5: User modifies `prd.md`
 
-### Step 6: `/speckit.tasks`
+### Step 6: `/speckit.implement`
 
 | Reference | State | Action |
 |-----------|-------|--------|
-| prd.md | MODIFIED | Load full + flag (4500 bytes) |
-| api-contract.yaml | INCORPORATED_ELSEWHERE | Summary only |
-| security-req.md | INCORPORATED_ELSEWHERE | Summary only |
+| prd.md | MODIFIED | Load full (4500 bytes) |
+| api-contract.yaml | INCORPORATED | Skip |
+| security-req.md | INCORPORATED | Skip |
 
-**Context used: 4640 bytes** (54% savings)
+**Context used: 4500 bytes**
 
 ---
 
@@ -424,29 +365,49 @@ After: manifest updated with checksums + AI summaries for spec.md
 | Command | Without Smart Loading | With Smart Loading | Savings |
 |---------|----------------------|-------------------|---------|
 | specify | 6,300 | 6,300 | 0% |
-| clarify | 6,300 | 0 | **100%** |
-| plan | 9,800 | 3,640 | **63%** |
-| tasks | 10,100 | 4,640 | **54%** |
-| implement | 10,100 | 140 | **99%** |
-| **Total** | **42,600** | **14,720** | **65%** |
+| plan | 6,300 | 0 | **100%** |
+| tasks | 9,800 | 3,500 | **64%** |
+| implement | 10,100 | 4,500 | **55%** |
+| **Total** | **32,500** | **14,300** | **56%** |
+
+---
+
+## Cross-Feature Simulation
+
+### Feature 001 Complete, Starting Feature 002
+
+```
+specs/001-auth/references/.references-state.json  ← has prd.md incorporated
+specs/002-dashboard/references/                    ← empty, fresh manifest
+```
+
+### Feature 002: `/speckit.specify`
+
+| Reference | Source | State | Action |
+|-----------|--------|-------|--------|
+| prd.md | copied to 002/references/ | NEW | Load full |
+
+**Why load full?** Feature 002 has its own manifest. The same `prd.md` is NEW
+to this feature because 002's manifest is empty. Dashboard feature may need
+different sections of the PRD than auth feature did.
 
 ---
 
 ## Testing Strategy
 
 ### Unit Tests
-- `test_state_detection.sh`: Given manifest + files, verify correct state assignment
-- `test_checksum_computation.sh`: Verify checksums are stable and correct
-- `test_manifest_update.sh`: Verify script correctly updates manifest structure
+- `test_state_detection.sh`: Given manifest + files, verify correct state
+- `test_checksum_computation.sh`: Verify checksums are stable
+- `test_manifest_update.sh`: Verify incorporated_into array updates correctly
 
 ### Integration Tests
 - Full workflow with mock references → verify context savings
 - Simulate file modifications → verify MODIFIED detection
-- Simulate file deletions → verify stale entry handling
+- New feature with inherited files → verify fresh loading
 
 ### Property-Based Tests
 - State machine transitions are deterministic
-- Manifest never loses data (append-only for incorporated_into)
+- Manifest incorporated_into is append-only within a feature
 - Checksums always match file content
 
 ---
@@ -468,18 +429,17 @@ After: manifest updated with checksums + AI summaries for spec.md
 
 ### Phase 1: MVP (Ship First)
 - `check-references.sh` with state detection
-- Basic manifest schema (v1)
+- Basic manifest schema (v1, no summaries)
 - Integration into `specify.md` and `plan.md` only
-- No cross-feature scanning
 
 ### Phase 2: Full Command Coverage
 - Add to all commands
 - `update-manifest.sh` for post-command updates
-- Validation script
+- `--force-load-refs` flag for escape hatch
 
-### Phase 3: Cross-Feature (If Needed)
-- Scan previous features' references (doc 09)
-- Add `--force-load-refs` escape hatch
+### Phase 3: Cross-Feature Enhancement (If Needed)
+- Project-level `references/` directory
+- Three-source scanning (doc 09)
 - Observability and metrics
 
 Start with Phase 1. Add complexity only when users hit real problems.

@@ -1,11 +1,9 @@
 {
     "permissions": {
         "allow": [
-            // ===== 기본 도구 =====
             "Read",
             "Edit",
             "Write",
-            // ===== 파일 시스템 (읽기 전용) =====
             "Bash(ls:*)",
             "Bash(cat:*)",
             "Bash(pwd:*)",
@@ -15,50 +13,52 @@
             "Bash(head:*)",
             "Bash(tail:*)",
             "Bash(wc:*)",
-            // ===== 파일 조작 =====
             "Bash(mkdir:*)",
             "Bash(touch:*)",
             "Bash(cp:*)",
             "Bash(mv:*)",
             "Bash(echo:*)",
-            // === 안전한 권한 변경 ===
             "Bash(chmod +x:*)",
             "Bash(chmod 755:*)",
             "Bash(chmod 644:*)",
             "Bash(chmod 600:*)",
-            // ===== 버전 관리 =====
             "Bash(git:*)",
             "Bash(gh:*)",
-            // ===== JavaScript/Node.js =====
+            "Bash(but:*)",
             "Bash(npm:*)",
             "Bash(npx:*)",
             "Bash(node:*)",
             "Bash(yarn:*)",
             "Bash(pnpm:*)",
-            // ===== Python =====
+            "Bash(uv:*)",
             "Bash(python:*)",
             "Bash(python3:*)",
+            "Bash(sqlite3:*)",
+            "Bash(psql:*)",
             "Bash(pip:*)",
             "Bash(pip3:*)",
             "Bash(poetry:*)",
             "Bash(pytest:*)",
             "Bash(mypy:*)",
-            "Bash(black:*)",
-            "Bash(flake8:*)",
-            // ===== 빌드/유틸리티 =====
+            "Bash(ruff:*)",
             "Bash(make:*)",
             "Bash(jq:*)",
             "Bash(lsof:*)",
-            // ===== 컨테이너 (제한적) =====
             "Bash(docker build:*)",
             "Bash(docker run:*)",
             "Bash(docker ps:*)",
             "Bash(docker logs:*)",
             "Bash(docker stop:*)",
-            "Bash(docker-compose:*)"
+            "Bash(docker-compose:*)",
+            "Bash(source .venv/bin/activate)",
+            "Bash(chmod +x:*)",
+            "Bash(chmod 755:*)",
+            "Bash(chmod 644:*)",
+            "Bash(chmod 600:*)",
+            "Bash(TZ=UTC date:*)",
+            "Bash(crontab:*)"
         ],
         "deny": [
-            // ===== 민감한 파일 =====
             "Read(**/.env)",
             "Read(**/.env.local)",
             "Read(**/.env.development.local)",
@@ -81,97 +81,66 @@
             "Write(**/secrets/**)",
             "Write(**/.ssh/**)",
             "Write(**/.aws/**)",
-            // ===== 위험한 삭제 =====
             "Bash(rm -rf:*)",
             "Bash(rm -fr:*)",
             "Bash(rm -r:*)",
             "Bash(rm --recursive:*)",
-            // === 권한 상승 (절대 금지) ===
             "Bash(sudo:*)",
             "Bash(su:*)",
             "Bash(chmod +s:*)",
             "Bash(chmod u+s:*)",
             "Bash(chmod g+s:*)",
-            "Bash(chmod 4*:*)", // setuid 포함
-            "Bash(chmod 2*:*)", // setgid 포함
-            "Bash(chmod 6*:*)", // 둘 다 포함
-            // === 위험한 권한 변경 ===
             "Bash(chmod 777:*)",
             "Bash(chmod 0777:*)",
             "Bash(chmod 666:*)",
             "Bash(chmod -R 777:*)",
             "Bash(chmod -R 666:*)",
             "Bash(chmod a=rwx:*)",
-            // ===== 시스템 영향 =====
             "Bash(shutdown:*)",
             "Bash(reboot:*)",
-            // ===== 위험한 Docker =====
             "Bash(docker run --privileged:*)",
             "Bash(docker system prune:*)",
-            // ===== 위험한 패키지 명령 =====
             "Bash(npm publish:*)",
             "Bash(pip install --break-system-packages:*)"
         ],
         "ask": [
-            // ===== 네트워크 요청 =====
             "Bash(curl:*)",
             "Bash(wget:*)",
             "WebFetch",
-            // ===== 파일 삭제 =====
-            "Bash(rm:*)"
+            "Bash(rm:*)",
+            "Bash(chmod:*)"
+        ]
+    },
+    "hooks": {
+        "PostToolUse": [
+            {
+                "matcher": "Write(*.py)",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "ruff check --fix --select I \"$file\" 2>/dev/null || true"
+                    },
+                    {
+                        "type": "command",
+                        "command": "ruff format \"$file\" 2>/dev/null || true"
+                    }
+                ]
+            }
+        ],
+        "Stop": [
+            {
+                "matcher": "",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "bash .claude/hooks/verify.sh"
+                    },
+                    {
+                        "type": "command",
+                        "command": "bash .claude/hooks/notify-stop.sh"
+                    }
+                ]
+            }
         ]
     }
-},
-"hooks": {
-    "PreToolUse": [
-        {
-            "matcher": "Edit|MultiEdit|Write",
-            "hooks": [
-                {
-                    "type": "command",
-                    "command": "but claude pre-tool" // Notify GitButler: start to edit files
-                }
-            ]
-        }
-    ],
-    "PostToolUse": [
-        {
-            "matcher": "Edit|MultiEdit|Write",
-            "hooks": [
-                {
-                    "type": "command",
-                    "command": "but claude post-tool" // Notify GitButler: Finished editing files
-                }
-            ]
-        },
-        {
-            "matcher": "Write(*.py)",
-            "hooks": [
-                {
-                    "type": "command",
-                    "command": "python -m black \"$file\" || true"
-                },
-                {
-                    "type": "command",
-                    "command": "python -m isort \"$file\" || true"
-                }
-            ],
-            "Stop": [
-                {
-                    "matcher": "",
-                    "hooks": [
-                        {
-                            "type": "command",
-                            "command": "but claude stop" // Notify GitButler: Finished a session
-                        },
-                        {
-                            "type": "command",
-                            "command": "osascript -e 'display notification \"$message\" with title \"$title\" \"Tab $TAB_NUMBER\"'"
-                        }
-                    ]
-                }
-            ]
-        }
-    ]
-}
 }
